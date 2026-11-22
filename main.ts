@@ -26,8 +26,14 @@ for (const name of shots) {
   }
 }
 
-rmSync(OUT, { recursive: true, force: true });
+// Clear only the CONTENTS of OUT, never OUT itself: on the grader the
+// output directory is a mounted volume whose parent (/) is read-only, so
+// removing OUT itself fails with EACCES (rmSync needs write on the parent).
+// Emptying it in place only needs write on OUT, which the grader provides.
 mkdirSync(OUT, { recursive: true });
+for (const name of readdirSync(OUT)) {
+  rmSync(join(OUT, name), { recursive: true, force: true });
+}
 cpSync(join(ROOT, 'game'), join(OUT, 'game'), { recursive: true });
 cpSync(shotsDir, join(OUT, 'screenshots'), { recursive: true });
 
