@@ -1,44 +1,105 @@
-// Keyboard + mouse input for MIDNIGHT VAULT. WASD/arrows move, SHIFT runs,
-// C sneaks, E (hold) picks doors, hacks terminals and drills the vault,
-// X drops a smoke bomb, P/Esc pauses, M mutes, Space/Enter confirms.
-export function createInput(onKey) {
-  const keys = new Set();
-  let click = null;
-  let smokeQueued = false;
+// MIDNIGHT VAULT — keyboard and mouse input. The browser loop polls this
+// once per frame; edge-triggered keys (smoke, pause, enter, mute) read true
+// only on the frame they were pressed.
 
-  function onKeyDown(e) {
-    const k = e.key.toLowerCase();
-    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
-    if (k === 'x' && !e.repeat) smokeQueued = true;
-    keys.add(k);
-    if (onKey) onKey(k, true);
+import { TILE } from './config.js';
+
+const KEYMAP = {
+  KeyW: 'up',
+  ArrowUp: 'up',
+  KeyS: 'down',
+  ArrowDown: 'down',
+  KeyA: 'left',
+  ArrowLeft: 'left',
+  KeyD: 'right',
+  ArrowRight: 'right',
+  ShiftLeft: 'run',
+  ShiftRight: 'run',
+  KeyC: 'sneak',
+  KeyE: 'interact',
+  KeyX: 'smoke',
+  KeyP: 'pause',
+  Enter: 'enter',
+  KeyM: 'mute',
+  Digit1: 'tool1',
+  Digit2: 'tool2',
+  Digit3: 'tool3',
+  Digit4: 'tool4',
+};
+
+export function createInput(canvas) {
+  const held = new Set();
+  const pressed = new Set();
+  let target = null;
+
+  function onKeyDown(event) {
+    const action = KEYMAP[event.code];
+    if (!action) return;
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) {
+      event.preventDefault();
+    }
+    if (!held.has(action)) pressed.add(action);
+    held.add(action);
   }
-  function onKeyUp(e) {
-    keys.delete(e.key.toLowerCase());
-    if (onKey) onKey(e.key.toLowerCase(), false);
+  function onKeyUp(event) {
+    const action = KEYMAP[event.code];
+    if (action) held.delete(action);
   }
-  function onMouseDown(e) {
-    const r = e.target.getBoundingClientRect();
-    click = { x: e.clientX - r.left, y: e.clientY - r.top };
+  function onClick(event) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    target = {
+      x: (event.clientX - rect.left) * scaleX,
+      y: (event.clientY - rect.top) * scaleY,
+    };
   }
+  function onBlur() {
+    held.clear();
+  }
+
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('blur', onBlur);
+  canvas.addEventListener('click', onClick);
 
-  function read() {
-    const x = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
-    const y = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
+  // Read the current input for one frame. Edge keys are consumed here, so
+  // a press is never reported twice.
+  function poll() {
     const out = {
-      x, y,
-      run: keys.has('shift'),
-      sneak: keys.has('c') || keys.has('control'),
-      interact: keys.has('e'),
-      smoke: smokeQueued,
-      click,
+      up: held.has('up'),
+      down: held.has('down'),
+      left: held.has('left'),
+      right: held.has('right'),
+      run: held.has('run'),
+      sneak: held.has('sneak'),
+      interact: held.has('interact'),
+      smoke: pressed.has('smoke'),
+      pause: pressed.has('pause'),
+      enter: pressed.has('enter'),
+      mute: pressed.has('mute'),
+      tool: null,
     };
-    smokeQueued = false;
-    click = null;
+    for (let i = 1; i <= 4; i++) {
+      if (pressed.has(`tool${i}`)) out.tool = i;
+    }
+    pressed.clear();
     return out;
   }
-  return { read, keys };
+
+  // The click-to-move target, in canvas pixels (null when none / consumed).
+  function takeTarget() {
+    const t = target;
+    target = null;
+    return t;
+  }
+
+  function dispose() {
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    window.removeEventListener('blur', onBlur);
+    canvas.removeEventListener('click', onClick);
+  }
+
+  return { poll, takeTarget, dispose };
 }

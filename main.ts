@@ -1,77 +1,41 @@
-// MIDNIGHT VAULT — The Last Job: the entry's hand-in program (Node 22,
-// standard library only). It runs in the grader's container with a read-only
-// repository beside it and a writable /output, no network, and at most 10
-// seconds.
-//
-// What it does, in order:
-//   1. Copies game/ (the playable static game) into the output directory.
-//   2. Copies screenshots/ (the game's real browser renders) alongside it.
-//   3. Writes dossier.json with buildDossier from vendor/makefun-game.ts,
-//      the kit's library, unchanged — the dossier is what the judge reads:
-//      the screenshots, and an outline of the game's source.
-//
-// Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-//
-// The program is deterministic: run it twice and the output bytes are the
-// same, because it only copies files and summarises them.
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+// MIDNIGHT VAULT — entrypoint the grader runs (Node 22, standard library
+// only): copies game/ and screenshots/ into MAKEFUN_OUTPUT_DIR (default
+// /output) and writes dossier.json there with make.fun's own dossier
+// builder. Two runs over the same tree write byte-identical output, and a
+// screenshot over 256 KiB is refused before anything is written.
+import { cpSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const repoRoot = dirname(fileURLToPath(import.meta.url));
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const ROOT = dirname(fileURLToPath(import.meta.url));
+const OUT = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const MAX_SCREENSHOT_BYTES = 262144;
 
-function fail(message: string): never {
-  throw new Error(`MIDNIGHT VAULT hand-in failed: ${message}`);
+const shotsDir = join(ROOT, 'screenshots');
+const shots = readdirSync(shotsDir)
+  .filter((name) => !name.startsWith('.'))
+  .sort();
+if (shots.length === 0) {
+  throw new Error('screenshots/: no images — an entry needs at least one screenshot');
 }
-
-function copyTree(source: string, target: string, label: string): void {
-  if (!existsSync(source)) fail(`missing ${label} directory at ${source}`);
-  mkdirSync(dirname(target), { recursive: true });
-  cpSync(source, target, { recursive: true });
-}
-
-function countFiles(dir: string): number {
-  let total = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    total += entry.isDirectory() ? countFiles(path) : 1;
-  }
-  return total;
-}
-
-function checkShotSizes(dir: string): void {
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    const size = statSync(path).size;
-    if (size > 262144) fail(`screenshot ${name} is ${size} bytes, over the 256 KiB cap`);
+for (const name of shots) {
+  const size = statSync(join(shotsDir, name)).size;
+  if (size > MAX_SCREENSHOT_BYTES) {
+    throw new Error(`screenshots/${name}: ${size} bytes, over the ${MAX_SCREENSHOT_BYTES} allowed`);
   }
 }
 
-const gameDir = join(repoRoot, 'game');
-const shotsDir = join(repoRoot, 'screenshots');
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+cpSync(join(ROOT, 'game'), join(OUT, 'game'), { recursive: true });
+cpSync(shotsDir, join(OUT, 'screenshots'), { recursive: true });
 
-mkdirSync(outputDir, { recursive: true });
-copyTree(gameDir, join(outputDir, 'game'), 'game');
-copyTree(shotsDir, join(outputDir, 'screenshots'), 'screenshots');
-
-const shotCount = readdirSync(shotsDir).filter((name) => !name.startsWith('.')).length;
-if (shotCount < 3 || shotCount > 4) fail(`expected 3 or 4 screenshots, found ${shotCount}`);
-checkShotSizes(shotsDir);
-if (countFiles(gameDir) > 993) fail('game/ holds more than 993 files');
-
-// The scorer's caps, as the kit's RULES.txt gives them: the dossier text is
-// capped at 160 KiB, at most 4 screenshots of 256 KiB each, game/ at most
-// 993 files and 48 MiB, every game path at most 1000 bytes.
-writeFileSync(
-  join(outputDir, 'dossier.json'),
-  buildDossier(outputDir, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+const dossier = buildDossier(OUT, {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+});
+writeFileSync(join(OUT, 'dossier.json'), dossier);
+console.log(`wrote ${join(OUT, 'dossier.json')} (${dossier.length} bytes, ${shots.length} screenshots)`);

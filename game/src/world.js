@@ -1,380 +1,722 @@
-// MIDNIGHT VAULT — pure heist logic, no DOM. A world is one job: the thief,
-// the guards and their vision cones, the rotating security cameras, the
-// loot, the vault, the terminal and the getaway van. Everything the render
-// and the screenshots need is on `state`.
+// MIDNIGHT VAULT — pure game logic, no DOM, no canvas, no audio.
+// Everything a headless test needs lives here: create a game, feed it
+// inputs, and read the state back. The browser modules only render this
+// state and translate keys into the input object update() expects.
+
 import {
-  STEP, TILE, COLS, ROWS, JOBS, LOOT,
-  PLAYER_SPEED, RUN_SPEED, SNEAK_SPEED, GUARD_SPEED, GUARD_CHASE_SPEED,
-  CONE_RANGE, CONE_HALF, CAMERA_RANGE, CAMERA_HALF, DETECT_GAIN, SUSPECT_AT,
-  ALARM_MAX, ALARM_DECAY, CAMERA_ALARM_RATE, POLICE_SECONDS,
-  NOISE_RUN_RADIUS, NOISE_DRILL_RADIUS, SMOKE_SECONDS, SMOKE_RADIUS,
-  CAMERA_OFF_SECONDS,
+  TILE,
+  MAP_COLS,
+  MAP_ROWS,
+  PLAYER_RADIUS,
+  WALK_SPEED,
+  RUN_SPEED,
+  SNEAK_SPEED,
+  GUARD_PATROL_SPEED,
+  GUARD_CHASE_SPEED,
+  GUARD_SUSPICIOUS_SPEED,
+  GUARD_SIGHT_RANGE,
+  GUARD_SIGHT_RANGE_DISGUISED,
+  GUARD_HALF_ANGLE,
+  GUARD_HEAR_RUN_RANGE,
+  GUARD_HEAR_DRILL_RANGE,
+  GUARD_CATCH_RANGE,
+  CAMERA_RANGE,
+  CAMERA_HALF_ANGLE,
+  CAMERA_SWEEP,
+  CAMERA_SWEEP_SPEED,
+  CAMERA_DISABLE_SECONDS,
+  ALARM_MAX,
+  ALARM_GUARD_RATE,
+  ALARM_CAMERA_RATE,
+  ALARM_DECAY_RATE,
+  POLICE_SECONDS,
+  LOCKPICK_SECONDS,
+  DOOR_SECONDS_NO_PICK,
+  HACK_SECONDS,
+  DRILL_SECONDS_WITH_RIG,
+  DRILL_SECONDS_NO_RIG,
+  INTERACT_RANGE,
+  SMOKE_PER_JOB,
+  SMOKE_RADIUS,
+  SMOKE_SECONDS,
+  MAX_CAUGHT,
+  GHOST_BONUS,
+  JOB_BONUS,
+  JOB_PAR_SECONDS,
+  LOOT_WEIGHT,
+  LOOT_VALUE,
+  JOBS,
+  TOOLS,
 } from './config.js';
+import { mulberry32 } from './random.js';
 
-export const EVENT_CLEAR = 1; // reached the van with the quota
-export const EVENT_BUSTED = 2; // police timer ran out (or caught 3 times)
-export const EVENT_CAUGHT = 4; // a guard tackled you: half the loot gone
-export const EVENT_WIN = 8; // all three jobs cleared
+export const TOOL_IDS = TOOLS.map((t) => t.id);
 
-const RAYS = 26;
+// ---------------------------------------------------------------- map parsing
 
-function angDiff(a, b) {
+function tileCenter(tx, ty) {
+  return { x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 };
+}
+
+// Parse one job's ASCII map into a playable job state. Rows are padded with
+// wall so a ragged map still parses.
+function parseJob(def, index, tools, rng) {
+  const rows = def.map;
+  const cols = Math.max(...rows.map((r) => r.length));
+  const grid = rows.map((row) => {
+    const chars = row.split('');
+    while (chars.length < cols) chars.push('#');
+    return chars;
+  });
+  const job = {
+    index,
+    name: def.name,
+    quota: def.quota,
+    cols,
+    rows: rows.length,
+    grid,
+    spawn: { x: TILE + TILE / 2, y: TILE + TILE / 2 },
+    van: null,
+    loot: [],
+    doors: [],
+    terminals: [],
+    vault: null,
+    cameras: [],
+    guards: [],
+    smokes: [],
+    alarm: 0,
+    alarmEverFull: false,
+    policeTimer: null,
+    caught: 0,
+    jobTime: 0,
+    smokesLeft: SMOKE_PER_JOB,
+    carried: [],
+    vanHintUntil: 0,
+    drilling: false,
+    running: false,
+    message: '',
+    messageUntil: 0,
+  };
+  for (let ty = 0; ty < rows.length; ty++) {
+    for (let tx = 0; tx < rows[ty].length; tx++) {
+      const ch = rows[ty][tx];
+      const c = tileCenter(tx, ty);
+      if (ch === 'P') job.spawn = { x: c.x, y: c.y };
+      else if (ch === 'E') job.van = { tx, ty, x: c.x, y: c.y };
+      else if (ch === 'c' || ch === 'j' || ch === 'a') {
+        const kind = ch === 'c' ? 'cash' : ch === 'j' ? 'jewels' : 'art';
+        job.loot.push({ kind, value: LOOT_VALUE[kind], x: c.x, y: c.y, taken: false });
+      } else if (ch === 'D') {
+        job.doors.push({ tx, ty, x: c.x, y: c.y, open: false, progress: 0 });
+      } else if (ch === 'T') {
+        job.terminals.push({ tx, ty, x: c.x, y: c.y, progress: 0 });
+      } else if (ch === 'V') {
+        job.vault = { tx, ty, x: c.x, y: c.y, open: false, progress: 0 };
+      } else if (ch === 'C') {
+        const n = job.cameras.length;
+        job.cameras.push({
+          x: c.x,
+          y: c.y,
+          baseAngle: [0, Math.PI, Math.PI / 2, -Math.PI / 2][n % 4],
+          phase: rng() * Math.PI * 2,
+          angle: 0,
+          disabledUntil: -1,
+          seeing: false,
+        });
+      }
+    }
+  }
+  for (const g of def.guards) {
+    const start = tileCenter(g.x, g.y);
+    const waypoints = g.waypoints.map(([wx, wy]) => tileCenter(wx, wy));
+    const next = waypoints[1] ?? waypoints[0];
+    job.guards.push({
+      x: start.x,
+      y: start.y,
+      dir: Math.atan2(next.y - start.y, next.x - start.x),
+      home: { x: start.x, y: start.y },
+      waypoints,
+      wp: 1,
+      mode: 'patrol',
+      alert: 0,
+      loseTime: 0,
+      lastSeen: null,
+      heard: null,
+      seeing: false,
+    });
+  }
+  // The player's position on the job, so sight helpers work before the
+  // first update tick as well.
+  job.playerX = job.spawn.x;
+  job.playerY = job.spawn.y;
+  return job;
+}
+
+// The effective tile character at (tx, ty): open doors read as floor, an
+// open vault reads as floor, everything else as drawn.
+export function tileAt(job, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= job.cols || ty >= job.rows) return '#';
+  const ch = job.grid[ty][tx];
+  if (ch === 'D') {
+    const door = job.doors.find((d) => d.tx === tx && d.ty === ty);
+    return door && door.open ? '.' : 'D';
+  }
+  if (ch === 'V') return job.vault && job.vault.open ? '.' : 'V';
+  return ch;
+}
+
+// Whether a tile blocks movement.
+export function solidAt(job, tx, ty) {
+  const ch = tileAt(job, tx, ty);
+  return ch === '#' || ch === 'B' || ch === 'D' || ch === 'V' || ch === 'T';
+}
+
+// Whether a tile blocks a line of sight (low furniture does not).
+function sightBlockingAt(job, tx, ty) {
+  const ch = tileAt(job, tx, ty);
+  return ch === '#' || ch === 'B' || ch === 'D' || ch === 'V';
+}
+
+// True when the segment between two points crosses no wall, crate, closed
+// door or vault — and no smoke cloud.
+export function lineOfSight(job, x0, y0, x1, y1) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.ceil(dist / 6));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const x = x0 + dx * t;
+    const y = y0 + dy * t;
+    if (sightBlockingAt(job, Math.floor(x / TILE), Math.floor(y / TILE))) return false;
+    for (const s of job.smokes) {
+      if (Math.hypot(x - s.x, y - s.y) < s.r) return false;
+    }
+  }
+  return true;
+}
+
+function angleDiff(a, b) {
   let d = a - b;
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return d;
 }
 
-export function createWorld(rng, jobIndex, tools) {
-  const job = JOBS[jobIndex];
-  const grid = job.map.map((row) => [...row]);
-  const has = (id) => tools.includes(id);
-  const tileAt = (tx, ty) => (grid[ty] && grid[ty][tx]) || '#';
-  const solidCh = (ch) => ch === '#' || ch === 'C' || ch === 'V' || ch === 'M';
-  const isSolidPx = (x, y) => {
-    const tx = Math.floor(x / TILE), ty = Math.floor(y / TILE);
-    if (tx < 0 || ty < 0 || tx >= COLS || ty >= ROWS) return true;
-    const ch = tileAt(tx, ty);
-    if (ch === 'D') return !doors.some((d) => d.tx === tx && d.ty === ty && d.open);
-    return solidCh(ch);
+// ---------------------------------------------------------------- game state
+
+export function createGame(seed = 20261122) {
+  return {
+    seed,
+    rng: mulberry32(seed),
+    phase: 'plan',
+    phaseBeforePause: null,
+    tools: [],
+    jobIndex: 0,
+    job: null,
+    player: { x: 0, y: 0, dir: 0, target: null },
+    score: 0,
+    totalLoot: 0,
+    runCaught: 0,
+    time: 0,
+    lastClear: null,
+    bustedReason: null,
+    muted: false,
+    _prev: { smoke: false, pause: false, enter: false },
   };
-
-  // --- parse the map -------------------------------------------------------
-  let start = { x: 60, y: 60 };
-  let van = { x: 0, y: 0 };
-  const guards = [];
-  const doors = [];
-  const loot = [];
-  let terminal = null;
-  const cameras = job.cameras.map((c) => ({
-    ...c, x: (c.tx + 0.5) * TILE, y: (c.ty + 0.5) * TILE, angle: c.base, sees: false,
-  }));
-  const vault = { ...job.vault, open: false, progress: 0 };
-  grid.forEach((row, y) => row.forEach((ch, x) => {
-    const cx = (x + 0.5) * TILE, cy = (y + 0.5) * TILE;
-    if (ch === 'P') start = { x: cx, y: cy };
-    else if (ch === 'E') van = { x: cx, y: cy };
-    else if (ch === 'G') guards.push({ x: cx, y: cy, patrol: null, waypoint: 0, angle: 0, state: 'patrol', suspicion: 0, pause: 0, scanBase: 0, scanDir: 1, investigate: null, searchT: 0, lastSeen: null });
-    else if (ch === 'D') doors.push({ tx: x, ty: y, open: false, progress: 0 });
-    else if (ch === 'T') terminal = { tx: x, ty: y, x: cx, y: cy, progress: 0, used: false };
-  }));
-  guards.forEach((g, i) => {
-    g.patrol = job.patrols[i].map(([tx, ty]) => ({ x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE }));
-  });
-  // Loot spots scan row-major; the job's loot list gives each spot its kind.
-  let li = 0;
-  grid.forEach((row, y) => row.forEach((ch, x) => {
-    if (ch === 'L') loot.push({ x: (x + 0.5) * TILE, y: (y + 0.5) * TILE, kind: job.loot[li++], taken: false });
-  }));
-
-  const state = {
-    jobIndex, job, tools,
-    status: 'play',
-    player: { x: start.x, y: start.y, angle: 0, carrying: [], lootValue: 0, weight: 0 },
-    guards, cameras, doors, loot, terminal, vault, van,
-    alarm: 0, police: -1, policeMax: POLICE_SECONDS,
-    camerasOff: 0, smokes: [], smokesLeft: has('smoke') ? 2 : 0,
-    catches: 0, time: 0, score: 0, ghost: true, cleared: false,
-    start, drillNoise: 0, runNoise: 0,
-  };
-
-  function inSmoke(x, y) {
-    return state.smokes.some((s) => Math.hypot(x - s.x, y - s.y) < SMOKE_RADIUS);
-  }
-
-  // Line of sight: true when nothing solid and no smoke sits between a and b.
-  // Samples inside the source tile never block: a camera mounted in a wall
-  // tile would otherwise be blind to its own room.
-  function hasLOS(ax, ay, bx, by) {
-    const stx = Math.floor(ax / TILE), sty = Math.floor(ay / TILE);
-    const dist = Math.hypot(bx - ax, by - ay);
-    const steps = Math.ceil(dist / 8);
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      const x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-      if (Math.floor(x / TILE) === stx && Math.floor(y / TILE) === sty) continue;
-      if (isSolidPx(x, y)) return false;
-      if (inSmoke(x, y)) return false;
-    }
-    return true;
-  }
-
-  // One ray of a vision cone, clipped by walls and crates.
-  function coneRay(x, y, angle, range) {
-    const step = 6;
-    const stx = Math.floor(x / TILE), sty = Math.floor(y / TILE);
-    let d = 0;
-    for (d = step; d <= range; d += step) {
-      const px = x + Math.cos(angle) * d, py = y + Math.sin(angle) * d;
-      if (Math.floor(px / TILE) === stx && Math.floor(py / TILE) === sty) continue;
-      if (isSolidPx(px, py)) break;
-    }
-    return { x: x + Math.cos(angle) * Math.min(d, range), y: y + Math.sin(angle) * Math.min(d, range) };
-  }
-
-  // The clipped vision-cone polygon (for the renderer, and for screenshots).
-  function conePolygon(x, y, angle, half, range) {
-    const pts = [{ x, y }];
-    for (let i = 0; i <= RAYS; i++) {
-      const a = angle - half + (2 * half * i) / RAYS;
-      pts.push(coneRay(x, y, a, range));
-    }
-    return pts;
-  }
-  function coneReach(x, y, angle, half, range) {
-    return conePolygon(x, y, angle, half, range).reduce((m, p) => Math.max(m, Math.hypot(p.x - x, p.y - y)), 0);
-  }
-
-  function moveCircle(e, dx, dy, r) {
-    const nx = e.x + dx;
-    if (!isSolidPx(nx + Math.sign(dx) * r, e.y - r * 0.7) && !isSolidPx(nx + Math.sign(dx) * r, e.y + r * 0.7)) e.x = nx;
-    const ny = e.y + dy;
-    if (!isSolidPx(e.x - r * 0.7, ny + Math.sign(dy) * r) && !isSolidPx(e.x + r * 0.7, ny + Math.sign(dy) * r)) e.y = ny;
-  }
-
-  function hearNoise(x, y, radius) {
-    for (const g of guards) {
-      if (g.state === 'alert') continue;
-      if (Math.hypot(g.x - x, g.y - y) < radius) {
-        g.state = 'suspect';
-        g.investigate = { x, y };
-        g.suspicion = Math.max(g.suspicion, 40);
-      }
-    }
-  }
-
-  function dropHalfLoot() {
-    const p = state.player;
-    if (p.carrying.length === 0) return;
-    const dropCount = Math.max(1, Math.floor(p.carrying.length / 2));
-    // Drop the most valuable first — getting caught hurts.
-    const sorted = [...p.carrying].sort((a, b) => LOOT[b.kind].value - LOOT[a.kind].value);
-    const dropped = sorted.slice(0, dropCount);
-    p.carrying = sorted.slice(dropCount);
-    p.lootValue = p.carrying.reduce((s, l) => s + LOOT[l.kind].value, 0);
-    p.weight = p.carrying.reduce((s, l) => s + LOOT[l.kind].weight, 0);
-    for (const l of dropped) {
-      // The dropped loot scatters back onto the floor where you were caught.
-      state.loot.push({ x: p.x + (rng() - 0.5) * 60, y: p.y + (rng() - 0.5) * 60, kind: l.kind, taken: false });
-    }
-  }
-
-  function stepGuard(g, dt, input) {
-    const p = state.player;
-    const range = has('disguise') ? 110 : CONE_RANGE;
-    const distP = Math.hypot(p.x - g.x, p.y - g.y);
-    let sees = false;
-    if (distP < range && !inSmoke(p.x, p.y)) {
-      const want = Math.atan2(p.y - g.y, p.x - g.x);
-      if (Math.abs(angDiff(want, g.angle)) < CONE_HALF && hasLOS(g.x, g.y, p.x, p.y)) sees = true;
-    }
-    if (sees) {
-      const closeness = 1 - distP / range;
-      const centrality = 1 - Math.abs(angDiff(Math.atan2(p.y - g.y, p.x - g.x), g.angle)) / CONE_HALF;
-      let rate = DETECT_GAIN * (0.35 + 0.65 * closeness) * (0.5 + 0.5 * centrality);
-      if (tileAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)) === 'B') rate *= 0.3;
-      if (input.sneak) rate *= 0.5;
-      if (input.run) rate *= 1.25;
-      g.suspicion = Math.min(100, g.suspicion + rate * dt);
-      g.lastSeen = { x: p.x, y: p.y };
-    } else {
-      g.suspicion = Math.max(0, g.suspicion - 26 * dt);
-    }
-
-    if (g.suspicion >= 100 && g.state !== 'alert') {
-      g.state = 'alert';
-      if (state.alarm < ALARM_MAX) state.alarm = Math.min(ALARM_MAX, state.alarm + 25);
-    } else if (g.suspicion >= SUSPECT_AT && g.state === 'patrol') {
-      g.state = 'suspect';
-      g.investigate = g.lastSeen ? { ...g.lastSeen } : { x: p.x, y: p.y };
-      g.scanBase = g.angle;
-    }
-
-    const wantAngle = (tx, ty) => Math.atan2(ty - g.y, tx - g.x);
-    const turnTo = (want, maxTurn) => {
-      const d = angDiff(want, g.angle);
-      g.angle += Math.max(-maxTurn, Math.min(maxTurn, d));
-    };
-
-    if (g.state === 'alert') {
-      const d = Math.hypot(p.x - g.x, p.y - g.y);
-      if (d < 26) return 'caught';
-      turnTo(wantAngle(p.x, p.y), 6 * dt);
-      moveCircle(g, Math.cos(g.angle) * GUARD_CHASE_SPEED * dt, Math.sin(g.angle) * GUARD_CHASE_SPEED * dt, 13);
-      if (!sees && g.suspicion < 30) { g.state = 'search'; g.searchT = 3; }
-    } else if (g.state === 'suspect') {
-      const target = g.investigate || g.lastSeen || { x: g.patrol[g.waypoint].x, y: g.patrol[g.waypoint].y };
-      const d = Math.hypot(target.x - g.x, target.y - g.y);
-      if (d < 10) {
-        // Arrived: scan the room for a while, then give up.
-        g.scanBase = g.angle;
-        g.angle += g.scanDir * 1.8 * dt;
-        if (Math.abs(angDiff(g.angle, g.scanBase)) > 0.9) g.scanDir *= -1;
-        g.searchT = (g.searchT || 0) + dt;
-        if (g.searchT > 2.5) { g.state = 'patrol'; g.searchT = 0; g.suspicion = Math.max(0, g.suspicion - 20); }
-      } else {
-        turnTo(wantAngle(target.x, target.y), 5 * dt);
-        moveCircle(g, Math.cos(g.angle) * GUARD_SPEED * 1.5 * dt, Math.sin(g.angle) * GUARD_SPEED * 1.5 * dt, 13);
-        g.searchT = 0;
-      }
-      if (g.suspicion < 10 && !sees) { g.state = 'patrol'; }
-    } else if (g.state === 'search') {
-      g.angle += 2.2 * dt;
-      g.searchT -= dt;
-      if (g.searchT <= 0) { g.state = 'patrol'; g.suspicion = 0; }
-    } else {
-      // Patrol: walk the waypoints, pausing and looking around at each one.
-      const target = g.patrol[g.waypoint];
-      const d = Math.hypot(target.x - g.x, target.y - g.y);
-      if (d < 6) {
-        g.waypoint = (g.waypoint + 1) % g.patrol.length;
-        g.pause = 1.2;
-        g.scanBase = g.angle;
-      } else if (g.pause > 0) {
-        g.pause -= dt;
-        g.angle += Math.sin(state.time * 2 + g.x) * 0.4 * dt;
-      } else {
-        turnTo(wantAngle(target.x, target.y), 4.5 * dt);
-        moveCircle(g, Math.cos(g.angle) * GUARD_SPEED * dt, Math.sin(g.angle) * GUARD_SPEED * dt, 13);
-      }
-    }
-    return null;
-  }
-
-  function step(dt, input, now) {
-    if (state.status !== 'play') return 0;
-    state.time += dt;
-    const p = state.player;
-    let events = 0;
-
-    // --- the thief moves ----------------------------------------------------
-    const weightFactor = Math.max(0.55, 1 - 0.15 * p.weight);
-    const speed = (input.run ? RUN_SPEED : input.sneak ? SNEAK_SPEED : PLAYER_SPEED) * weightFactor;
-    const len = Math.hypot(input.x, input.y);
-    if (len > 0.01) {
-      const dx = (input.x / len) * speed * dt, dy = (input.y / len) * speed * dt;
-      moveCircle(p, dx, dy, 13);
-      p.angle = Math.atan2(input.y, input.x);
-    }
-    // Running is loud.
-    if (input.run && len > 0.01) {
-      state.runNoise -= dt;
-      if (state.runNoise <= 0) { hearNoise(p.x, p.y, NOISE_RUN_RADIUS); state.runNoise = 0.35; }
-    }
-    // Smoke bomb.
-    if (input.smoke && state.smokesLeft > 0) {
-      state.smokes.push({ x: p.x, y: p.y, t: SMOKE_SECONDS });
-      state.smokesLeft -= 1;
-    }
-    for (const s of state.smokes) s.t -= dt;
-    state.smokes = state.smokes.filter((s) => s.t > 0);
-
-    // --- loot pickup ---------------------------------------------------------
-    for (const l of state.loot) {
-      if (!l.taken && Math.hypot(l.x - p.x, l.y - p.y) < 24) {
-        l.taken = true;
-        p.carrying.push(l);
-        p.lootValue += LOOT[l.kind].value;
-        p.weight += LOOT[l.kind].weight;
-        state.score += LOOT[l.kind].value;
-      }
-    }
-
-    // --- hold-E interactions: doors, terminal, vault -------------------------
-    const near = (tx, ty, r) => Math.hypot((tx + 0.5) * TILE - p.x, (ty + 0.5) * TILE - p.y) < r;
-    if (input.interact) {
-      for (const d of doors) {
-        if (!d.open && near(d.tx, d.ty, 46)) {
-          d.progress += dt * (has('lockpicks') ? 2 : 1 / 3);
-          if (d.progress >= 1) d.open = true;
-        }
-      }
-      if (terminal && !terminal.used && near(terminal.tx, terminal.ty, 52)) {
-        terminal.progress += dt / 2;
-        if (terminal.progress >= 1) { terminal.used = true; state.camerasOff = CAMERA_OFF_SECONDS; }
-      }
-      if (!vault.open) {
-        const vx = (vault.x + vault.w / 2) * TILE, vy = (vault.y + vault.h / 2) * TILE;
-        if (Math.hypot(vx - p.x, vy - p.y) < 78) {
-          vault.progress += dt * (has('drill') ? 0.25 : 1 / 12);
-          state.drillNoise -= dt;
-          if (state.drillNoise <= 0) { hearNoise(p.x, p.y, NOISE_DRILL_RADIUS); state.drillNoise = 0.5; }
-          if (vault.progress >= 1) {
-            vault.open = true;
-            // The gold slides out onto the floor in front of the vault.
-            const gy = (vault.y + 1.5) * TILE;
-            state.loot.push({ x: vx, y: gy, kind: job.vaultLoot, taken: false });
-          }
-        }
-      }
-    }
-
-    // --- cameras ---------------------------------------------------------------
-    if (state.camerasOff > 0) state.camerasOff -= dt;
-    let cameraSees = false;
-    for (const c of cameras) {
-      c.angle = c.base + Math.sin(state.time * c.speed) * c.sweep;
-      c.sees = false;
-      if (state.camerasOff > 0) continue;
-      const dist = Math.hypot(p.x - c.x, p.y - c.y);
-      if (dist < CAMERA_RANGE && !inSmoke(p.x, p.y)) {
-        const want = Math.atan2(p.y - c.y, p.x - c.x);
-        if (Math.abs(angDiff(want, c.angle)) < CAMERA_HALF && hasLOS(c.x, c.y, p.x, p.y)) {
-          c.sees = true;
-          cameraSees = true;
-          state.alarm = Math.min(ALARM_MAX, state.alarm + CAMERA_ALARM_RATE * dt);
-        }
-      }
-    }
-
-    // --- guards ------------------------------------------------------------------
-    for (const g of guards) {
-      if (stepGuard(g, dt, input) === 'caught') {
-        state.catches += 1;
-        dropHalfLoot();
-        p.x = state.start.x; p.y = state.start.y;
-        state.alarm = Math.max(state.alarm, 60);
-        state.ghost = false;
-        for (const gg of guards) { gg.state = 'patrol'; gg.suspicion = 0; gg.investigate = null; }
-        events |= EVENT_CAUGHT;
-        if (state.catches >= 3) {
-          state.status = 'busted';
-          events |= EVENT_BUSTED;
-          return events;
-        }
-      }
-    }
-
-    // --- the alarm and the police --------------------------------------------------
-    const anyAlert = guards.some((g) => g.state === 'alert');
-    if (state.alarm >= ALARM_MAX && state.police < 0) {
-      // The alarm latches: once the police are called, there is no cooling off.
-      state.ghost = false;
-      state.police = POLICE_SECONDS;
-    }
-    if (state.police < 0 && !anyAlert && !cameraSees) state.alarm = Math.max(0, state.alarm - ALARM_DECAY * dt);
-    if (state.police >= 0) {
-      state.police -= dt;
-      if (state.police <= 0) {
-        state.police = 0;
-        state.status = 'busted';
-        events |= EVENT_BUSTED;
-        return events;
-      }
-    }
-
-    // --- the getaway van -----------------------------------------------------------
-    if (Math.hypot(van.x - p.x, van.y - p.y) < 30 && p.lootValue >= job.quota) {
-      const timeBonus = Math.max(0, Math.round(500 - 4 * state.time));
-      state.score += 1000 + timeBonus + (state.ghost ? 500 : 0);
-      state.status = 'clear';
-      state.cleared = true;
-      events |= EVENT_CLEAR;
-    }
-    return events;
-  }
-
-  return { state, step, hasLOS, conePolygon, coneReach, tileAt, isSolidPx };
 }
 
-export { STEP };
+export function hasTool(state, toolId) {
+  return state.tools.includes(toolId);
+}
+
+// Toggle a tool in the PLAN phase. At most two may be picked; picking a
+// third is ignored.
+export function toggleTool(state, toolId) {
+  if (state.phase !== 'plan') return false;
+  if (!TOOL_IDS.includes(toolId)) return false;
+  const at = state.tools.indexOf(toolId);
+  if (at >= 0) {
+    state.tools.splice(at, 1);
+    return true;
+  }
+  if (state.tools.length >= 2) return false;
+  state.tools.push(toolId);
+  return true;
+}
+
+export function startJob(state, index) {
+  const def = JOBS[index];
+  state.jobIndex = index;
+  state.job = parseJob(def, index, state.tools, state.rng);
+  state.player.x = state.job.spawn.x;
+  state.player.y = state.job.spawn.y;
+  state.player.dir = 0;
+  state.player.target = null;
+  state.phase = 'play';
+}
+
+export function beginRun(state) {
+  if (state.tools.length !== 2) return false;
+  startJob(state, 0);
+  return true;
+}
+
+function resetRun(state) {
+  state.phase = 'plan';
+  state.tools = [];
+  state.jobIndex = 0;
+  state.job = null;
+  state.score = 0;
+  state.totalLoot = 0;
+  state.runCaught = 0;
+  state.time = 0;
+  state.lastClear = null;
+  state.bustedReason = null;
+}
+
+export function carriedValue(job) {
+  return job.carried.reduce((n, item) => n + item.value, 0);
+}
+
+function carryWeight(job) {
+  return job.carried.reduce((n, item) => n + LOOT_WEIGHT[item.kind], 0);
+}
+
+function setMessage(job, text) {
+  job.message = text;
+  job.messageUntil = job.jobTime + 2.5;
+}
+
+// ---------------------------------------------------------------- sight
+
+export function guardCanSee(job, guard, tools) {
+  const dx = job.playerX - guard.x;
+  const dy = job.playerY - guard.y;
+  const dist = Math.hypot(dx, dy);
+  const range = tools.includes('disguise') ? GUARD_SIGHT_RANGE_DISGUISED : GUARD_SIGHT_RANGE;
+  if (dist > range) return false;
+  if (Math.abs(angleDiff(Math.atan2(dy, dx), guard.dir)) > GUARD_HALF_ANGLE) return false;
+  return lineOfSight(job, guard.x, guard.y, job.playerX, job.playerY);
+}
+
+export function cameraCanSee(job, camera) {
+  if (job.jobTime < camera.disabledUntil) return false;
+  const dx = job.playerX - camera.x;
+  const dy = job.playerY - camera.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > CAMERA_RANGE) return false;
+  if (Math.abs(angleDiff(Math.atan2(dy, dx), camera.angle)) > CAMERA_HALF_ANGLE) return false;
+  return lineOfSight(job, camera.x, camera.y, job.playerX, job.playerY);
+}
+
+// ---------------------------------------------------------------- scoring
+
+function clearJob(state) {
+  const job = state.job;
+  const loot = carriedValue(job);
+  const jobBonus = JOB_BONUS[job.index];
+  const timeBonus = Math.max(0, Math.round(JOB_PAR_SECONDS[job.index] - job.jobTime)) * 10;
+  const ghostBonus = job.alarmEverFull ? 0 : GHOST_BONUS;
+  const total = loot + jobBonus + timeBonus + ghostBonus;
+  state.score += total;
+  state.totalLoot += loot;
+  state.lastClear = {
+    job: job.index,
+    name: job.name,
+    loot,
+    jobBonus,
+    timeBonus,
+    ghostBonus,
+    total,
+  };
+  state.phase = job.index >= JOBS.length - 1 ? 'win' : 'jobClear';
+}
+
+function bustJob(state, reason) {
+  state.bustedReason = reason;
+  state.phase = 'busted';
+}
+
+function onCaught(state) {
+  const job = state.job;
+  job.caught += 1;
+  state.runCaught += 1;
+  // Lose half the carried loot: drop items from the top of the bag until
+  // at least half the value is gone.
+  const total = carriedValue(job);
+  let toDrop = total / 2;
+  while (toDrop > 0 && job.carried.length > 0) {
+    const item = job.carried.pop();
+    toDrop -= item.value;
+  }
+  state.player.x = job.spawn.x;
+  state.player.y = job.spawn.y;
+  state.player.target = null;
+  job.alarm = 0;
+  job.policeTimer = null;
+  job.smokes = [];
+  for (const g of job.guards) {
+    g.x = g.home.x;
+    g.y = g.home.y;
+    g.wp = 1;
+    g.mode = 'patrol';
+    g.alert = 0;
+    g.loseTime = 0;
+    g.lastSeen = null;
+    g.heard = null;
+  }
+  if (job.caught >= MAX_CAUGHT) {
+    bustJob(state, 'caught');
+  } else {
+    setMessage(job, `Caught! Lost half the loot. (${job.caught}/${MAX_CAUGHT})`);
+  }
+}
+
+// ---------------------------------------------------------------- movement
+
+function circleHitsSolid(job, x, y) {
+  const r = PLAYER_RADIUS;
+  const x0 = Math.floor((x - r) / TILE);
+  const x1 = Math.floor((x + r) / TILE);
+  const y0 = Math.floor((y - r) / TILE);
+  const y1 = Math.floor((y + r) / TILE);
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      if (solidAt(job, tx, ty)) {
+        // Closest point of the tile to the circle centre.
+        const cx = Math.max(tx * TILE, Math.min(x, tx * TILE + TILE));
+        const cy = Math.max(ty * TILE, Math.min(y, ty * TILE + TILE));
+        if (Math.hypot(x - cx, y - cy) < r) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function moveCircle(job, pos, dx, dy) {
+  if (dx !== 0 && !circleHitsSolid(job, pos.x + dx, pos.y)) pos.x += dx;
+  if (dy !== 0 && !circleHitsSolid(job, pos.x, pos.y + dy)) pos.y += dy;
+}
+
+// ---------------------------------------------------------------- update
+
+export function update(state, input = {}, dt = 1 / 60) {
+  const prev = state._prev;
+  const pausePressed = !!input.pause && !prev.pause;
+  const enterPressed = !!input.enter && !prev.enter;
+  const smokePressed = !!input.smoke && !prev.smoke;
+  prev.pause = !!input.pause;
+  prev.enter = !!input.enter;
+  prev.smoke = !!input.smoke;
+
+  if (pausePressed && (state.phase === 'play' || state.phase === 'paused')) {
+    if (state.phase === 'play') {
+      state.phaseBeforePause = 'play';
+      state.phase = 'paused';
+    } else {
+      state.phase = state.phaseBeforePause ?? 'play';
+      state.phaseBeforePause = null;
+    }
+    return;
+  }
+
+  if (state.phase === 'plan') {
+    if (enterPressed) beginRun(state);
+    return;
+  }
+  if (state.phase === 'jobClear') {
+    if (enterPressed) startJob(state, state.jobIndex + 1);
+    return;
+  }
+  if (state.phase === 'win' || state.phase === 'busted') {
+    if (enterPressed) resetRun(state);
+    return;
+  }
+  if (state.phase !== 'play' || !state.job) return;
+
+  const job = state.job;
+  const player = state.player;
+  job.jobTime += dt;
+  state.time += dt;
+  // Keep the player's position on the job too, so sight helpers read it.
+  job.playerX = player.x;
+  job.playerY = player.y;
+
+  // --- smoke bomb (edge triggered) ---
+  if (smokePressed) {
+    if (hasTool(state, 'smoke') && job.smokesLeft > 0) {
+      job.smokes.push({ x: player.x, y: player.y, r: SMOKE_RADIUS, t: SMOKE_SECONDS });
+      job.smokesLeft -= 1;
+    } else if (hasTool(state, 'smoke')) {
+      setMessage(job, 'Out of smoke bombs.');
+    }
+  }
+  for (const s of job.smokes) s.t -= dt;
+  job.smokes = job.smokes.filter((s) => s.t > 0);
+
+  // --- movement ---
+  let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  if (mx === 0 && my === 0 && player.target) {
+    const dx = player.target.x - player.x;
+    const dy = player.target.y - player.y;
+    if (Math.hypot(dx, dy) < 6) {
+      player.target = null;
+    } else {
+      mx = dx / Math.hypot(dx, dy);
+      my = dy / Math.hypot(dx, dy);
+    }
+  }
+  const moving = mx !== 0 || my !== 0;
+  const weight = carryWeight(job);
+  const speedFactor = 1 / (1 + 0.07 * weight);
+  let speed = WALK_SPEED * speedFactor;
+  if (input.run) speed = RUN_SPEED * speedFactor;
+  if (input.sneak) speed = SNEAK_SPEED * speedFactor;
+  job.running = moving && !!input.run && !input.sneak;
+  if (moving) {
+    const len = Math.hypot(mx, my) || 1;
+    const step = speed * dt;
+    moveCircle(job, player, (mx / len) * step, (my / len) * step);
+    player.dir = Math.atan2(my / len, mx / len);
+  }
+  job.playerX = player.x;
+  job.playerY = player.y;
+
+  // --- interaction: hold E near a door, terminal or vault ---
+  let target = null;
+  let targetKind = null;
+  let targetNeed = 0;
+  const near = (x, y) => Math.hypot(player.x - x, player.y - y) <= INTERACT_RANGE;
+  let best = Infinity;
+  for (const door of job.doors) {
+    if (door.open) continue;
+    const d = Math.hypot(player.x - door.x, player.y - door.y);
+    if (d < best && near(door.x, door.y)) {
+      best = d;
+      target = door;
+      targetKind = 'door';
+      targetNeed = hasTool(state, 'lockpick') ? LOCKPICK_SECONDS : DOOR_SECONDS_NO_PICK;
+    }
+  }
+  for (const term of job.terminals) {
+    const d = Math.hypot(player.x - term.x, player.y - term.y);
+    if (d < best && near(term.x, term.y)) {
+      best = d;
+      target = term;
+      targetKind = 'terminal';
+      targetNeed = HACK_SECONDS;
+    }
+  }
+  if (job.vault && !job.vault.open) {
+    const d = Math.hypot(player.x - job.vault.x, player.y - job.vault.y);
+    if (d < best && near(job.vault.x, job.vault.y)) {
+      best = d;
+      target = job.vault;
+      targetKind = 'vault';
+      targetNeed = hasTool(state, 'drill') ? DRILL_SECONDS_WITH_RIG : DRILL_SECONDS_NO_RIG;
+    }
+  }
+  job.drilling = false;
+  const interactables = [
+    ...job.doors.filter((d) => !d.open),
+    ...job.terminals,
+    ...(job.vault && !job.vault.open ? [job.vault] : []),
+  ];
+  for (const it of interactables) {
+    if (it !== target) it.progress = Math.max(0, it.progress - dt * 2);
+  }
+  if (target && input.interact) {
+    target.progress += dt;
+    if (targetKind === 'vault') job.drilling = true;
+    if (target.progress >= targetNeed) {
+      if (targetKind === 'door') {
+        target.open = true;
+        setMessage(job, 'Door picked.');
+      } else if (targetKind === 'terminal') {
+        target.progress = 0;
+        for (const cam of job.cameras) cam.disabledUntil = job.jobTime + CAMERA_DISABLE_SECONDS;
+        setMessage(job, `Cameras down for ${CAMERA_DISABLE_SECONDS}s.`);
+      } else if (targetKind === 'vault') {
+        target.open = true;
+        target.progress = 0;
+        job.loot.push({
+          kind: 'gold',
+          value: LOOT_VALUE.gold,
+          x: target.x,
+          y: target.y,
+          taken: false,
+        });
+        setMessage(job, 'Vault open — gold bars!');
+      }
+    }
+  }
+
+  // --- loot pickup ---
+  for (const loot of job.loot) {
+    if (!loot.taken && Math.hypot(player.x - loot.x, player.y - loot.y) < 22) {
+      loot.taken = true;
+      job.carried.push({ kind: loot.kind, value: loot.value });
+    }
+  }
+
+  // --- guards ---
+  let anyGuardSeeing = false;
+  for (const guard of job.guards) {
+    const seeing = guardCanSee(job, guard, state.tools);
+    guard.seeing = seeing;
+    if (seeing) {
+      anyGuardSeeing = true;
+      guard.loseTime = 0;
+      guard.lastSeen = { x: player.x, y: player.y };
+      guard.heard = null;
+      guard.alert = Math.min(1, guard.alert + dt * 0.9);
+    } else {
+      guard.loseTime += dt;
+      guard.alert = Math.max(0, guard.alert - dt * 0.35);
+    }
+    // Hearing: running feet, or the drill.
+    const dPlayer = Math.hypot(player.x - guard.x, player.y - guard.y);
+    if (job.running && moving && dPlayer < GUARD_HEAR_RUN_RANGE) {
+      guard.heard = { x: player.x, y: player.y };
+      guard.alert = Math.max(guard.alert, 0.35);
+    }
+    if (job.drilling && job.vault) {
+      const dVault = Math.hypot(job.vault.x - guard.x, job.vault.y - guard.y);
+      if (dVault < GUARD_HEAR_DRILL_RANGE) {
+        guard.heard = { x: job.vault.x, y: job.vault.y };
+        guard.alert = Math.max(guard.alert, 0.35);
+      }
+    }
+    // Mode from alert, with hysteresis so a guard does not flicker.
+    if (guard.alert >= 1) guard.mode = 'chase';
+    else if (guard.mode === 'chase' && guard.alert < 0.5) guard.mode = 'suspicious';
+    else if (guard.mode !== 'chase' && guard.alert >= 0.35) guard.mode = 'suspicious';
+    else if (guard.alert < 0.2) guard.mode = 'patrol';
+
+    if (guard.mode === 'patrol') {
+      const wp = guard.waypoints[guard.wp];
+      const dx = wp.x - guard.x;
+      const dy = wp.y - guard.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 6) {
+        guard.wp = (guard.wp + 1) % guard.waypoints.length;
+      } else {
+        const step = GUARD_PATROL_SPEED * dt;
+        guard.dir = Math.atan2(dy, dx);
+        moveCircle(job, guard, (dx / dist) * step, (dy / dist) * step);
+      }
+    } else if (guard.mode === 'suspicious') {
+      const goal = guard.lastSeen ?? guard.heard;
+      if (goal && !seeing) {
+        const dx = goal.x - guard.x;
+        const dy = goal.y - guard.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 10) {
+          const step = GUARD_SUSPICIOUS_SPEED * dt;
+          guard.dir = Math.atan2(dy, dx);
+          moveCircle(job, guard, (dx / dist) * step, (dy / dist) * step);
+        }
+      } else if (guard.lastSeen) {
+        guard.dir = Math.atan2(guard.lastSeen.y - guard.y, guard.lastSeen.x - guard.x);
+      }
+    } else if (guard.mode === 'chase') {
+      const dx = player.x - guard.x;
+      const dy = player.y - guard.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 4) {
+        const step = GUARD_CHASE_SPEED * dt;
+        guard.dir = Math.atan2(dy, dx);
+        moveCircle(job, guard, (dx / dist) * step, (dy / dist) * step);
+      }
+      if (dist < GUARD_CATCH_RANGE) {
+        onCaught(state);
+        return;
+      }
+    }
+  }
+
+  // --- cameras ---
+  let anyCameraSeeing = false;
+  for (const cam of job.cameras) {
+    cam.angle = cam.baseAngle + Math.sin(job.jobTime * CAMERA_SWEEP_SPEED + cam.phase) * CAMERA_SWEEP;
+    cam.seeing = cameraCanSee(job, cam);
+    if (cam.seeing) anyCameraSeeing = true;
+  }
+
+  // --- alarm ---
+  if (anyGuardSeeing) job.alarm += ALARM_GUARD_RATE * dt;
+  if (anyCameraSeeing) job.alarm += ALARM_CAMERA_RATE * dt;
+  if (!anyGuardSeeing && !anyCameraSeeing && job.policeTimer === null) {
+    job.alarm = Math.max(0, job.alarm - ALARM_DECAY_RATE * dt);
+  }
+  if (job.alarm >= ALARM_MAX) {
+    job.alarm = ALARM_MAX;
+    job.alarmEverFull = true;
+    if (job.policeTimer === null) {
+      job.policeTimer = POLICE_SECONDS;
+      setMessage(job, `ALARM! Police in ${POLICE_SECONDS}s — get to the van!`);
+    }
+  }
+  if (job.policeTimer !== null) {
+    job.policeTimer -= dt;
+    if (job.policeTimer <= 0) {
+      job.policeTimer = 0;
+      bustJob(state, 'police');
+      return;
+    }
+  }
+
+  // --- getaway van ---
+  if (job.van && Math.hypot(player.x - job.van.x, player.y - job.van.y) < 26) {
+    if (carriedValue(job) >= job.quota) {
+      clearJob(state);
+      return;
+    }
+    if (job.jobTime > job.vanHintUntil) {
+      setMessage(job, `Need $${job.quota - carriedValue(job)} more loot for this job.`);
+      job.vanHintUntil = job.jobTime + 2.5;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- snapshot
+
+// A plain, rounded view of the state for tests and determinism checks.
+export function snapshot(state) {
+  const job = state.job;
+  const round3 = (n) => Math.round(n * 1000) / 1000;
+  return {
+    phase: state.phase,
+    jobIndex: state.jobIndex,
+    score: state.score,
+    totalLoot: state.totalLoot,
+    tools: [...state.tools].sort(),
+    player: job
+      ? { x: round3(state.player.x), y: round3(state.player.y) }
+      : null,
+    carriedValue: job ? carriedValue(job) : 0,
+    carried: job ? job.carried.map((c) => c.kind) : [],
+    alarm: job ? round3(job.alarm) : 0,
+    policeTimer: job && job.policeTimer !== null ? round3(job.policeTimer) : null,
+    caught: job ? job.caught : 0,
+    vaultOpen: job && job.vault ? job.vault.open : false,
+    doorsOpen: job ? job.doors.filter((d) => d.open).length : 0,
+    lootTaken: job ? job.loot.filter((l) => l.taken).length : 0,
+    smokesLeft: job ? job.smokesLeft : 0,
+    guards: job
+      ? job.guards.map((g) => ({
+          x: round3(g.x),
+          y: round3(g.y),
+          mode: g.mode,
+          alert: round3(g.alert),
+        }))
+      : [],
+    camerasDisabled: job
+      ? job.cameras.filter((c) => job.jobTime < c.disabledUntil).length
+      : 0,
+  };
+}
+
+export { MAP_COLS, MAP_ROWS };

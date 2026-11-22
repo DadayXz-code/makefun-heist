@@ -1,99 +1,146 @@
-// Procedural WebAudio for MIDNIGHT VAULT: no sound files, every effect is
-// synthesised. Footsteps, guard steps by distance, pickups, the vault drill,
-// camera bleeps, suspicion, the alarm, getting caught, and the getaway.
+// MIDNIGHT VAULT — procedural WebAudio sounds. No audio files: every
+// effect is synthesized, and everything is a no-op until the player has
+// interacted with the page (browsers block audio before a gesture).
+
 export function createAudio() {
   let ctx = null;
   let muted = false;
-  let drillNode = null;
+  let drillNodes = null;
 
-  function ac() {
-    if (!ctx) {
-      try {
-        ctx = new (window.AudioContext || window.webkitAudioContext)();
-      } catch {
-        return null;
-      }
+  function ensure() {
+    if (ctx) {
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      return ctx;
     }
-    if (ctx.state === 'suspended') ctx.resume();
-    return ctx;
+    try {
+      const AC = window.AudioContext ?? window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+      return ctx;
+    } catch {
+      return null;
+    }
   }
 
-  function tone(freq, dur, type = 'sine', vol = 0.12, slideTo = null, delay = 0) {
+  function tone(freq, seconds, type = 'sine', volume = 0.12, slideTo = null) {
     if (muted) return;
-    const c = ac();
-    if (!c) return;
-    const t = c.currentTime + delay;
-    const o = c.createOscillator();
-    const g = c.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(freq, t);
-    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g).connect(c.destination);
-    o.start(t);
-    o.stop(t + dur + 0.02);
+    const ac = ensure();
+    if (!ac) return;
+    try {
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, ac.currentTime);
+      if (slideTo !== null) osc.frequency.exponentialRampToValueAtTime(slideTo, ac.currentTime + seconds);
+      gain.gain.setValueAtTime(volume, ac.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + seconds);
+      osc.connect(gain).connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + seconds);
+    } catch {
+      // Audio is decoration; never break the game for it.
+    }
   }
 
-  function noiseBurst(dur, vol = 0.1, freq = 800) {
+  function noiseBurst(seconds, volume = 0.1) {
     if (muted) return;
-    const c = ac();
-    if (!c) return;
-    const len = Math.floor(c.sampleRate * dur);
-    const buf = c.createBuffer(1, len, c.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
-    const src = c.createBufferSource();
-    src.buffer = buf;
-    const f = c.createBiquadFilter();
-    f.type = 'lowpass';
-    f.frequency.value = freq;
-    const g = c.createGain();
-    g.gain.value = vol;
-    src.connect(f).connect(g).connect(c.destination);
-    src.start();
+    const ac = ensure();
+    if (!ac) return;
+    try {
+      const len = Math.floor(ac.sampleRate * seconds);
+      const buffer = ac.createBuffer(1, len, ac.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      const src = ac.createBufferSource();
+      const gain = ac.createGain();
+      gain.gain.value = volume;
+      src.buffer = buffer;
+      src.connect(gain).connect(ac.destination);
+      src.start();
+    } catch {
+      // Ignore.
+    }
   }
 
   return {
-    get muted() { return muted; },
-    toggleMute() { muted = !muted; if (drillNode) this.stopDrill(); return muted; },
-    step(run) { noiseBurst(0.05, run ? 0.09 : 0.045, run ? 1200 : 500); },
-    guardStep(dist) {
-      if (dist > 320) return;
-      noiseBurst(0.06, 0.11 * (1 - dist / 340), 300);
+    unlock() {
+      ensure();
     },
-    pickup() { tone(660, 0.09, 'sine', 0.12); tone(990, 0.12, 'sine', 0.1, null, 0.07); },
-    gold() { tone(523, 0.1, 'triangle', 0.14); tone(784, 0.1, 'triangle', 0.12, null, 0.08); tone(1046, 0.16, 'triangle', 0.12, null, 0.16); },
-    door() { tone(220, 0.12, 'square', 0.06, 330); },
-    hack() { tone(880, 0.08, 'square', 0.07); tone(1174, 0.08, 'square', 0.07, null, 0.09); tone(1568, 0.14, 'square', 0.08, null, 0.18); },
-    cameraBleep() { tone(1568, 0.07, 'square', 0.05); },
-    suspicious() { tone(392, 0.16, 'triangle', 0.12, 523); },
-    alarm() { tone(440, 0.22, 'sawtooth', 0.09, 880); tone(880, 0.22, 'sawtooth', 0.07, 440, 0.22); },
-    caught() { tone(220, 0.3, 'sawtooth', 0.14, 110); noiseBurst(0.25, 0.12, 400); },
-    smoke() { noiseBurst(0.4, 0.1, 900); },
-    startDrill() {
-      if (muted || drillNode) return;
-      const c = ac();
-      if (!c) return;
-      const o = c.createOscillator();
-      o.type = 'sawtooth';
-      o.frequency.value = 90;
-      const g = c.createGain();
-      g.gain.value = 0.05;
-      const f = c.createBiquadFilter();
-      f.type = 'bandpass';
-      f.frequency.value = 400;
-      o.connect(f).connect(g).connect(c.destination);
-      o.start();
-      drillNode = { o, g };
+    setMuted(m) {
+      muted = !!m;
+      if (muted) this.drillStop();
     },
-    stopDrill() {
-      if (!drillNode) return;
-      try { drillNode.o.stop(); } catch { /* already stopped */ }
-      drillNode = null;
+    get muted() {
+      return muted;
     },
-    clear() { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.18, 'triangle', 0.13, null, i * 0.11)); },
-    win() { [523, 659, 784, 1046, 1318, 1568].forEach((f, i) => tone(f, 0.24, 'triangle', 0.13, null, i * 0.13)); },
-    busted() { [392, 370, 349, 311].forEach((f, i) => tone(f, 0.26, 'sawtooth', 0.1, null, i * 0.18)); },
+    pickup() {
+      tone(880, 0.09, 'sine', 0.1);
+      setTimeout(() => tone(1318, 0.12, 'sine', 0.08), 60);
+    },
+    click() {
+      tone(1200, 0.05, 'square', 0.05);
+    },
+    door() {
+      tone(300, 0.08, 'triangle', 0.1, 180);
+      noiseBurst(0.05, 0.06);
+    },
+    hack() {
+      tone(660, 0.07, 'square', 0.06);
+      setTimeout(() => tone(990, 0.07, 'square', 0.06), 80);
+      setTimeout(() => tone(1320, 0.1, 'square', 0.06), 160);
+    },
+    alarm() {
+      tone(620, 0.5, 'sawtooth', 0.07, 920);
+      setTimeout(() => tone(920, 0.5, 'sawtooth', 0.07, 620), 500);
+    },
+    caught() {
+      tone(220, 0.4, 'sawtooth', 0.12, 110);
+    },
+    smoke() {
+      noiseBurst(0.35, 0.12);
+    },
+    clear() {
+      [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.16, 'sine', 0.1), i * 110));
+    },
+    win() {
+      [523, 659, 784, 1046, 1318].forEach((f, i) => setTimeout(() => tone(f, 0.22, 'sine', 0.1), i * 130));
+    },
+    busted() {
+      [392, 330, 262, 196].forEach((f, i) => setTimeout(() => tone(f, 0.25, 'triangle', 0.1), i * 160));
+    },
+    drillStart() {
+      if (muted || drillNodes) return;
+      const ac = ensure();
+      if (!ac) return;
+      try {
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.value = 90;
+        gain.gain.value = 0.05;
+        const lfo = ac.createOscillator();
+        const lfoGain = ac.createGain();
+        lfo.frequency.value = 11;
+        lfoGain.gain.value = 30;
+        lfo.connect(lfoGain).connect(osc.frequency);
+        osc.connect(gain).connect(ac.destination);
+        osc.start();
+        lfo.start();
+        drillNodes = { osc, lfo, gain };
+      } catch {
+        drillNodes = null;
+      }
+    },
+    drillStop() {
+      if (!drillNodes) return;
+      try {
+        drillNodes.gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+        drillNodes.osc.stop(ctx.currentTime + 0.1);
+        drillNodes.lfo.stop(ctx.currentTime + 0.1);
+      } catch {
+        // Ignore.
+      }
+      drillNodes = null;
+    },
   };
 }

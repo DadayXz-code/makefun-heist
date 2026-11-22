@@ -14,7 +14,7 @@ Then come the three jobs:
 - **2 · Grand Museum** — three guards, three cameras, quota $6,000. The art pays well, but every piece slows you down.
 - **3 · Crown Casino** — four guards, four cameras, quota $9,000. The last job — make it count.
 
-Slip past **guard vision cones** and sweeping **security cameras**, pick locked doors, hack the terminal to kill the cameras for 20 seconds, and **drill the vault** open — loud, slow, and worth every second. Every sighting feeds the **alarm meter**; max it out and the **police countdown** starts (45 seconds to reach the van or it's over). Grab enough loot to meet the **loot quota**, then reach the **getaway van** for a clean getaway. Get caught three times and the crew walks away.
+Slip past **guard vision cones** and sweeping **security cameras**, pick locked doors, hack the terminal to kill the cameras for 20 seconds, and **drill the vault** open — loud, slow, and worth every second. Every sighting feeds the **alarm meter**; max it out and the **police countdown** starts (45 seconds to reach the van or it's over). Clear a job without ever maxing the alarm for a $500 ghost bonus. Grab enough loot to meet the **loot quota**, then reach the **getaway van** for a clean getaway. Get caught three times and the crew walks away.
 
 Controls: WASD/arrows move · SHIFT run (loud) · C sneak · E hold to pick / hack / drill · X smoke bomb · P pause · M mute.
 

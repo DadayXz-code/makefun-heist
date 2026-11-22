@@ -1,17 +1,27 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MIDNIGHT VAULT — The Last Job</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #05060f; height: 100%; }
-  body { display: flex; align-items: center; justify-content: center; }
-  canvas { image-rendering: auto; max-width: 100vw; max-height: 100vh; }
+  html, body { margin: 0; padding: 0; background: #0b0c10; height: 100%; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: monospace, sans-serif; color: #e8e8e8; gap: 10px;
+  }
+  h1 { margin: 0; font-size: 20px; letter-spacing: 4px; color: #e8c33a; }
+  p { margin: 0; font-size: 12px; color: #9aa0ad; }
+  canvas {
+    background: #0e0f13; border: 2px solid #3a3f4d; border-radius: 4px;
+    image-rendering: pixelated; max-width: 96vw; max-height: 82vh;
+  }
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
+<h1>MIDNIGHT VAULT</h1>
+<canvas id="game" width="832" height="512"></canvas>
+<p>WASD / arrows move &middot; SHIFT run &middot; C sneak &middot; E hold: pick / hack / drill &middot; X smoke &middot; P pause &middot; M mute</p>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

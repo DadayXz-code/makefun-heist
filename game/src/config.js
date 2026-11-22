@@ -1,160 +1,183 @@
-// MIDNIGHT VAULT — tuning constants and the three jobs. A job is one building:
-// an ASCII map, guard patrols, security cameras, loot spots, a vault, a
-// terminal and the getaway van. Maps are 24 by 15 tiles of 40 px.
-export const STEP = 1 / 60;
-export const TILE = 40;
-export const COLS = 24;
-export const ROWS = 15;
-export const VIEW_W = COLS * TILE; // 960
-export const VIEW_H = ROWS * TILE; // 600
+// Static configuration for MIDNIGHT VAULT: board size, tools, loot values,
+// tuning numbers and the three job maps (ASCII, one per job).
+//
+// Map legend:
+//   #  wall            B  crate (blocks movement and sight)
+//   .  floor           D  locked door
+//   T  terminal        V  vault (drill it open)
+//   c  cash $500       j  jewels $1,500
+//   a  art $2,500      P  player spawn
+//   C  camera          E  getaway van
+// Rows may be ragged; the parser pads short rows with wall.
 
-// Movement and senses.
-export const PLAYER_SPEED = 132; // px/s walking
-export const RUN_SPEED = 208; // px/s running (loud)
-export const SNEAK_SPEED = 62; // px/s sneaking (quiet)
-export const GUARD_SPEED = 58; // px/s on patrol
-export const GUARD_CHASE_SPEED = 152; // px/s when chasing
-export const CONE_RANGE = 195; // guard vision range, px
-export const CONE_HALF = 0.58; // guard vision half-angle, rad
-export const CAMERA_RANGE = 175; // camera vision range, px
-export const CAMERA_HALF = 0.5; // camera vision half-angle, rad
-export const DETECT_GAIN = 85; // suspicion per second at point blank
-export const SUSPECT_AT = 55; // suspicion that turns a guard curious
+export const TILE = 32;
+export const MAP_COLS = 26;
+export const MAP_ROWS = 16;
+export const VIEW_W = MAP_COLS * TILE;
+export const VIEW_H = MAP_ROWS * TILE;
+
+export const PLAYER_RADIUS = 11;
+export const WALK_SPEED = 150;
+export const RUN_SPEED = 228;
+export const SNEAK_SPEED = 74;
+export const GUARD_PATROL_SPEED = 56;
+export const GUARD_CHASE_SPEED = 136;
+export const GUARD_SUSPICIOUS_SPEED = 84;
+
+export const GUARD_SIGHT_RANGE = 225;
+export const GUARD_SIGHT_RANGE_DISGUISED = 110;
+export const GUARD_HALF_ANGLE = 0.62; // ~35 degrees each side
+export const GUARD_SUSPICIOUS_AFTER = 0.35; // seconds of sight -> "?"
+export const GUARD_CHASE_AFTER = 1.1; // seconds of sight -> "!"
+export const GUARD_HEAR_RUN_RANGE = 175;
+export const GUARD_HEAR_DRILL_RANGE = 285;
+export const GUARD_CATCH_RANGE = 24;
+
+export const CAMERA_RANGE = 250;
+export const CAMERA_HALF_ANGLE = 0.5;
+export const CAMERA_SWEEP = 0.65; // radians of swing each side
+export const CAMERA_SWEEP_SPEED = 0.55;
+export const CAMERA_DISABLE_SECONDS = 20;
+
 export const ALARM_MAX = 100;
-export const ALARM_DECAY = 3; // per second while nobody sees you
-export const CAMERA_ALARM_RATE = 28; // alarm per second inside a camera cone
-export const POLICE_SECONDS = 45; // countdown once the alarm maxes out
-export const NOISE_RUN_RADIUS = 104; // guards hear running this far
-export const NOISE_DRILL_RADIUS = 165; // guards hear drilling this far
+export const ALARM_GUARD_RATE = 25; // per second while any guard sees you
+export const ALARM_CAMERA_RATE = 30; // per second while a camera sees you
+export const ALARM_DECAY_RATE = 4; // per second while unseen
+export const POLICE_SECONDS = 45;
+
+export const LOCKPICK_SECONDS = 0.5;
+export const DOOR_SECONDS_NO_PICK = 2.5;
+export const HACK_SECONDS = 2;
+export const DRILL_SECONDS_WITH_RIG = 4;
+export const DRILL_SECONDS_NO_RIG = 12;
+export const INTERACT_RANGE = 52;
+
+export const SMOKE_PER_JOB = 2;
+export const SMOKE_RADIUS = 72;
 export const SMOKE_SECONDS = 8;
-export const SMOKE_RADIUS = 90;
-export const CAMERA_OFF_SECONDS = 20; // terminal hack disables cameras this long
 
-// Tools (the plan phase lets the crew pick two of four).
-export const TOOLS = [
-  { id: 'lockpicks', name: 'Lockpicks', cost: 'free', blurb: 'Doors open in half a second instead of three.' },
-  { id: 'smoke', name: 'Smoke bombs', cost: 'free', blurb: 'X drops a smoke cloud (2 per job). Nobody sees through it.' },
-  { id: 'drill', name: 'Drill rig', cost: 'free', blurb: 'The vault drills open in 4 seconds instead of 12.' },
-  { id: 'disguise', name: 'Disguise', cost: 'free', blurb: 'Guards only notice you within 110 px. Cameras still see you.' },
-];
+export const MAX_CAUGHT = 3;
+export const GHOST_BONUS = 500;
+export const JOB_BONUS = [1000, 1500, 2000];
+export const JOB_PAR_SECONDS = [180, 240, 300];
 
-// Loot values. Gold is heavy: every bar cuts your speed by 15%.
-export const LOOT = {
-  cash: { value: 500, weight: 0, label: 'Cash', color: '#7ee787' },
-  jewels: { value: 1500, weight: 0, label: 'Jewels', color: '#7dd3fc' },
-  art: { value: 2500, weight: 0.5, label: 'Art', color: '#f0abfc' },
-  gold: { value: 3000, weight: 1, label: 'Gold', color: '#fbbf24' },
+// How much each loot kind slows the thief: heavier loot, slower feet.
+export const LOOT_WEIGHT = { cash: 0, jewels: 1, art: 2, gold: 3 };
+export const LOOT_VALUE = { cash: 500, jewels: 1500, art: 2500, gold: 3000 };
+export const LOOT_LABEL = {
+  cash: 'Cash',
+  jewels: 'Jewels',
+  art: 'Art',
+  gold: 'Gold bars',
 };
 
-// Map legend: # wall · . floor · C crate (blocks sight) · B shadow (hides you)
-// P thief start · G guard · E getaway van · V vault · D locked door
-// T terminal (hack the cameras) · M camera mount (on a wall) · L loot spot
-// (loot kinds are listed per job in `loot`, in the order the L tiles scan;
-// `vaultLoot` is what drilling the vault open reveals.)
+export const TOOLS = [
+  {
+    id: 'lockpick',
+    name: 'Lockpicks',
+    key: '1',
+    blurb: 'Pick a locked door in 0.5s instead of 2.5s.',
+  },
+  {
+    id: 'smoke',
+    name: 'Smoke bombs',
+    key: '2',
+    blurb: 'Press X to drop smoke (2 per job). Smoke blocks every eye.',
+  },
+  {
+    id: 'drill',
+    name: 'Drill rig',
+    key: '3',
+    blurb: 'Drill the vault open in 4s instead of 12s. Loud either way.',
+  },
+  {
+    id: 'disguise',
+    name: 'Disguise',
+    key: '4',
+    blurb: 'Guards ignore you beyond 110 px. Cameras still see you.',
+  },
+];
+
 export const JOBS = [
   {
-    name: '1 · Harbor Bank',
-    brief: 'Two guards, two cameras, one vault. The gold inside is worth $3,000 — the quota is $4,000, so the vault is not optional.',
+    name: 'Harbor Bank',
     quota: 4000,
     map: [
-      '########################',
-      '#P....C......B...VV.L..#',
-      '#..####....M###...##...#',
-      '#..#.........G.........#',
-      '#..#..C......#...C.....#',
-      '#..####....####........#',
-      '#......................#',
-      '#.B......C.....C....L..M',
-      '#..####....####........#',
-      '#..#..........#........#',
-      '#..#..G.......#..L.....#',
-      '#..####....####........#',
-      '#....T..............E..#',
-      '#..L.......C...........#',
-      '########################',
+      '##########################',
+      '#P...#.........a.........#',
+      '#....D....c....#....j....#',
+      '#....#.........#.........#',
+      '#....#....B....#....B....#',
+      '#....#######D###....C....#',
+      '#....#....#...#..........#',
+      '#....#....#.V.#....C.....#',
+      '#....#....#...#..........#',
+      '#....#######D###....B....#',
+      '#....#.........T.........#',
+      '#....D....c....#....j....#',
+      '#....#...................#',
+      '#....#.........B.........#',
+      '#E...#...................#',
+      '##########################',
     ],
-    patrols: [
-      [[7, 3], [18, 3], [18, 6], [7, 6]],
-      [[7, 10], [10, 10], [10, 12], [7, 12]],
+    guards: [
+      { x: 19, y: 1, waypoints: [[19, 1], [23, 1], [23, 3], [19, 3]] },
+      { x: 18, y: 11, waypoints: [[18, 11], [23, 11], [23, 13], [18, 13]] },
     ],
-    cameras: [
-      { tx: 11, ty: 2, base: 1.57, sweep: 0.85, speed: 0.45 },
-      { tx: 23, ty: 7, base: 3.14, sweep: 0.8, speed: 0.35 },
-    ],
-    loot: ['cash', 'cash', 'jewels', 'cash'],
-    vaultLoot: 'gold',
-    vault: { x: 17, y: 1, w: 2, h: 1 },
   },
   {
-    name: '2 · Grand Museum',
-    brief: 'Three guards, three cameras, and art on every wall. The quota is $6,000 — take the art, but it slows you down.',
+    name: 'Grand Museum',
     quota: 6000,
     map: [
-      '########################',
-      '#P....C......B...VV.L..#',
-      '#...###.....###.....M..#',
-      '#..#......G.......#....#',
-      '#..#..C......#...C.....#',
-      '#..####....####........#',
-      '#......................#',
-      '#.B......C.....C...L...M',
-      '#..####....####........#',
-      '#.L...#.G..#.#.G..#....#',
-      '#......................#',
-      '#.C...###D...##.....#..#',
-      '#..............B...M.E.#',
-      '#..L.T.....C.......#...#',
-      '########################',
+      '##########################',
+      '#P...#....a....#....j....#',
+      '#....D....c....D....c....#',
+      '#....#.........#.........#',
+      '#....#....B....#....B....#',
+      '#....#######D###....C....#',
+      '#....#....#...#..........#',
+      '#....#....#.V.#....C.....#',
+      '#....#....#...#..........#',
+      '#....#######D###....B....#',
+      '#....#....a....T....j....#',
+      '#....D....c....#.........#',
+      '#....#...................#',
+      '#....#....B....#....C....#',
+      '#E...#...................#',
+      '##########################',
     ],
-    patrols: [
-      [[7, 3], [10, 3], [10, 6], [7, 6]],
-      [[10, 10], [16, 10], [16, 12], [10, 12]],
-      [[15, 9], [17, 9], [17, 10], [15, 10]],
+    guards: [
+      { x: 18, y: 1, waypoints: [[18, 1], [23, 1], [23, 3], [18, 3]] },
+      { x: 7, y: 11, waypoints: [[7, 11], [14, 11], [14, 12], [7, 12]] },
+      { x: 18, y: 11, waypoints: [[18, 11], [23, 11], [23, 13], [18, 13]] },
     ],
-    cameras: [
-      { tx: 20, ty: 2, base: 1.57, sweep: 0.9, speed: 0.5 },
-      { tx: 23, ty: 7, base: 3.14, sweep: 0.8, speed: 0.4 },
-      { tx: 19, ty: 12, base: -1.57, sweep: 0.85, speed: 0.45 },
-    ],
-    loot: ['cash', 'art', 'cash', 'art'],
-    vaultLoot: 'gold',
-    vault: { x: 17, y: 1, w: 2, h: 1 },
   },
   {
-    name: '3 · Crown Casino',
-    brief: 'Four guards, four cameras, laser-tight patrols and a $9,000 quota. The last job — make it count.',
+    name: 'Crown Casino',
     quota: 9000,
     map: [
-      '########################',
-      '#P....C......B...VV.L..#',
-      '#..####....M###...##...#',
-      '#..#......G......G.....#',
-      '#..#..C......#...C.....#',
-      '#..####....####..M.....#',
-      '#......................#',
-      '#.B......C.....C...L...M',
-      '#..####....####........#',
-      '#.L...#..G..#..G..#....#',
-      '#......................#',
-      '#.C...###D...##.....#..#',
-      '#..............B...M.E.#',
-      '#..L.T.....C.......#...#',
-      '########################',
+      '##########################',
+      '#P...#....j....#....a....#',
+      '#....D....c....D....j....#',
+      '#....#....a....#....c....#',
+      '#....#....B....#....B....#',
+      '#....#######D###....C....#',
+      '#....#....#...#.....C....#',
+      '#....#....#.V.#..........#',
+      '#....#....#...#....C.....#',
+      '#....#######D###....B....#',
+      '#....#....a....T....j....#',
+      '#....D....c....#....c....#',
+      '#....#.........B.........#',
+      '#....#....C....#.........#',
+      '#E...#...................#',
+      '##########################',
     ],
-    patrols: [
-      [[7, 3], [10, 3], [10, 6], [7, 6]],
-      [[15, 3], [20, 3], [20, 6], [15, 6]],
-      [[10, 10], [16, 10], [16, 12], [10, 12]],
-      [[15, 9], [17, 9], [17, 10], [15, 10]],
+    guards: [
+      { x: 18, y: 1, waypoints: [[18, 1], [23, 1], [23, 3], [18, 3]] },
+      { x: 7, y: 1, waypoints: [[7, 1], [13, 1], [13, 3], [7, 3]] },
+      { x: 8, y: 11, waypoints: [[8, 11], [13, 11], [13, 13], [8, 13]] },
+      { x: 18, y: 11, waypoints: [[18, 11], [23, 11], [23, 13], [18, 13]] },
     ],
-    cameras: [
-      { tx: 11, ty: 2, base: 1.57, sweep: 0.9, speed: 0.55 },
-      { tx: 23, ty: 7, base: 3.14, sweep: 0.8, speed: 0.4 },
-      { tx: 19, ty: 12, base: -1.57, sweep: 0.85, speed: 0.45 },
-      { tx: 17, ty: 5, base: 1.57, sweep: 0.85, speed: 0.5 },
-    ],
-    loot: ['cash', 'jewels', 'art', 'art'],
-    vaultLoot: 'gold',
-    vault: { x: 17, y: 1, w: 2, h: 1 },
   },
 ];
